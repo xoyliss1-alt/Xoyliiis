@@ -512,6 +512,9 @@ async def cb_admin_withdrawals(call: CallbackQuery):
     await call.message.edit_text(text, reply_markup=admin_back())
     await call.answer()
 
+async def myid(message: Message):
+    await message.answer("Ваш Telegram ID: " + str(message.from_user.id) + "\nДля уведомлений администратора добавьте это число в переменную ADMIN_IDS на Render.")
+
 async def health(request):
     return web.Response(text="WoodooGifi is alive")
 
@@ -535,6 +538,7 @@ async def main():
     dp.message.register(process_admin_channel_name, AdminStates.channel_name)
     dp.message.register(process_admin_user_id, AdminStates.user_id)
     dp.message.register(process_admin_balance_value, AdminStates.balance_value)
+    dp.message.register(myid, Command("myid"))
     dp.message.register(withdraw, Command("withdraw"))
     dp.message.register(cmd_stats, Command("stats"))
     dp.message.register(setreward, Command("setreward"))
