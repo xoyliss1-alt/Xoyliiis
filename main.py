@@ -11,6 +11,9 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton
@@ -67,6 +70,26 @@ def setting(key, default=""):
 
 def is_admin(user):
     return bool(user and (user.id in ADMIN_IDS or (user.username and user.username.lower() == ADMIN_USERNAME)))
+
+class AdminStates(StatesGroup):
+    reward = State()
+    channel_id = State()
+    channel_link = State()
+    channel_name = State()
+    user_id = State()
+    balance_value = State()
+
+def admin_inline_keyboard():
+    return inline([
+      [InlineKeyboardButton(text="🎁 Награда за реферала", callback_data="adm_reward")],
+      [InlineKeyboardButton(text="📢 Каналы", callback_data="adm_channels")],
+      [InlineKeyboardButton(text="💰 Изменить баланс", callback_data="adm_balance")],
+      [InlineKeyboardButton(text="📊 Статистика", callback_data="adm_stats")],
+      [InlineKeyboardButton(text="📥 Заявки на вывод", callback_data="adm_withdrawals")],
+    ])
+
+def admin_back():
+    return inline([[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")]])
 
 def main_keyboard(admin=False):
     rows = [
@@ -171,9 +194,9 @@ async def admin_panel(message_or_call, user):
             "/approve ID или /reject ID — обработать заявку\n\n"
             "Бот должен быть администратором обязательных каналов, чтобы проверка подписки работала надёжно.")
     if isinstance(message_or_call, Message):
-        await message_or_call.answer(text)
+        await message_or_call.answer(text, reply_markup=admin_inline_keyboard())
     else:
-        await message_or_call.message.answer(text)
+        await message_or_call.message.answer(text, reply_markup=admin_inline_keyboard())
 
 async def on_start(message: Message, bot: Bot):
     arg = (message.text or "").partition(" ")[2].strip()
@@ -339,15 +362,179 @@ async def process_withdrawal(message: Message, approve: bool):
     try: await message.bot.send_message(row["user_id"], f"Заявка на вывод #{wid}: {'одобрена администратором' if approve else 'отклонена, сумма возвращена на баланс'}.")
     except Exception: pass
 
+
+async def cb_admin_panel(call: CallbackQuery):
+    if not is_admin(call.from_user):
+        await call.answer("⛔ Нет доступа.", show_alert=True); return
+    await call.message.edit_text("🛡 Админ-панель WoodooGifi\nВыберите действие:", reply_markup=admin_inline_keyboard())
+    await call.answer()
+
+async def cb_admin_reward(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user):
+        await call.answer("⛔ Нет доступа.", show_alert=True); return
+    await state.set_state(AdminStates.reward)
+    await call.message.edit_text("🎁 Награда за реферала сейчас: " + setting("referral_reward", "3") + " ⭐\nОтправьте новую сумму от 0 до 100000:", reply_markup=admin_back())
+    await call.answer()
+
+async def process_admin_reward(message: Message, state: FSMContext):
+    if not is_admin(message.from_user): await state.clear(); return
+    try: amount = int((message.text or "").strip())
+    except ValueError:
+        await message.answer("❌ Введите целое число от 0 до 100000."); return
+    if not 0 <= amount <= 100000:
+        await message.answer("❌ Значение должно быть от 0 до 100000."); return
+    with closing(db()) as c:
+        c.execute("INSERT INTO settings(key,value) VALUES('referral_reward',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(amount),)); c.commit()
+    await state.clear()
+    await message.answer("✅ Награда изменена: " + str(amount) + " ⭐", reply_markup=main_keyboard(True))
+
+async def cb_admin_channels(call: CallbackQuery):
+    if not is_admin(call.from_user):
+        await call.answer("⛔ Нет доступа.", show_alert=True); return
+    channels = get_channels()
+    lines = ["📢 Обязательные каналы:"]
+    lines += [str(x["title"]) + " (" + str(x["chat_id"]) + ") — " + str(x["url"]) for x in channels]
+    if not channels: lines.append("Список пуст.")
+    rows = [[InlineKeyboardButton(text="➕ Добавить канал", callback_data="adm_add_channel")]]
+    rows += [[InlineKeyboardButton(text="❌ " + str(x["title"])[:40], callback_data="adm_delch:" + str(x["chat_id"]))] for x in channels]
+    rows += [[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")]]
+    await call.message.edit_text("\n".join(lines), reply_markup=inline(rows), disable_web_page_preview=True)
+    await call.answer()
+
+async def cb_admin_add_channel(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user):
+        await call.answer("⛔ Нет доступа.", show_alert=True); return
+    await state.set_state(AdminStates.channel_id)
+    await call.message.edit_text("Отправьте ID канала (например, -1001234567890) или @username:", reply_markup=admin_back())
+    await call.answer()
+
+async def process_admin_channel_id(message: Message, state: FSMContext):
+    if not is_admin(message.from_user): await state.clear(); return
+    value = (message.text or "").strip()
+    if not value or len(value) > 150:
+        await message.answer("❌ Некорректный ID."); return
+    await state.update_data(ch_id=value)
+    await state.set_state(AdminStates.channel_link)
+    await message.answer("Отправьте ссылку канала https://t.me/...")
+
+async def process_admin_channel_link(message: Message, state: FSMContext):
+    if not is_admin(message.from_user): await state.clear(); return
+    value = (message.text or "").strip()
+    if not value.startswith("https://t.me/") or len(value) > 300:
+        await message.answer("❌ Ссылка должна начинаться с https://t.me/"); return
+    await state.update_data(ch_link=value)
+    await state.set_state(AdminStates.channel_name)
+    await message.answer("Отправьте название канала:")
+
+async def process_admin_channel_name(message: Message, state: FSMContext):
+    if not is_admin(message.from_user): await state.clear(); return
+    title = (message.text or "").strip()
+    if not title or len(title) > 100:
+        await message.answer("❌ Название должно быть от 1 до 100 символов."); return
+    data = await state.get_data()
+    with closing(db()) as c:
+        c.execute("INSERT OR REPLACE INTO channels(chat_id,title,url) VALUES(?,?,?)", (data["ch_id"], title, data["ch_link"])); c.commit()
+    await state.clear()
+    await message.answer("✅ Канал добавлен. Бот должен быть администратором канала.", reply_markup=main_keyboard(True))
+
+async def cb_admin_delete_channel(call: CallbackQuery):
+    if not is_admin(call.from_user):
+        await call.answer("⛔ Нет доступа.", show_alert=True); return
+    ch_id = call.data.split(":", 1)[1]
+    with closing(db()) as c:
+        cur = c.execute("DELETE FROM channels WHERE chat_id=?", (ch_id,)); c.commit()
+    await call.answer("Канал удалён." if cur.rowcount else "Канал не найден.", show_alert=True)
+    channels = get_channels()
+    lines = ["📢 Обязательные каналы:"] + [str(x["title"]) + " (" + str(x["chat_id"]) + ")" for x in channels]
+    if not channels: lines.append("Список пуст.")
+    rows = [[InlineKeyboardButton(text="➕ Добавить канал", callback_data="adm_add_channel")]]
+    rows += [[InlineKeyboardButton(text="❌ " + str(x["title"])[:40], callback_data="adm_delch:" + str(x["chat_id"]))] for x in channels]
+    rows += [[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")]]
+    await call.message.edit_text("\n".join(lines), reply_markup=inline(rows))
+
+async def cb_admin_balance(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user):
+        await call.answer("⛔ Нет доступа.", show_alert=True); return
+    await state.set_state(AdminStates.user_id)
+    await call.message.edit_text("💰 Отправьте Telegram ID пользователя:", reply_markup=admin_back())
+    await call.answer()
+
+async def process_admin_user_id(message: Message, state: FSMContext):
+    if not is_admin(message.from_user): await state.clear(); return
+    try: uid = int((message.text or "").strip())
+    except ValueError:
+        await message.answer("❌ ID должен быть числом."); return
+    with closing(db()) as c:
+        row = c.execute("SELECT balance FROM users WHERE user_id=?", (uid,)).fetchone()
+    if not row:
+        await message.answer("❌ Пользователь не найден. Он должен сначала запустить бота."); return
+    await state.update_data(target_id=uid)
+    await state.set_state(AdminStates.balance_value)
+    await message.answer("Баланс: " + str(row["balance"]) + " ⭐\nВведите новое значение (100) или изменение (+10 / -5):")
+
+async def process_admin_balance_value(message: Message, state: FSMContext):
+    if not is_admin(message.from_user): await state.clear(); return
+    raw = (message.text or "").strip()
+    try: value = int(raw)
+    except ValueError:
+        await message.answer("❌ Введите целое число."); return
+    data = await state.get_data()
+    uid = data["target_id"]
+    with closing(db()) as c:
+        row = c.execute("SELECT balance FROM users WHERE user_id=?", (uid,)).fetchone()
+        if not row:
+            await message.answer("❌ Пользователь не найден."); await state.clear(); return
+        new_balance = max(0, value if not raw.startswith(("+", "-")) else row["balance"] + value)
+        delta = new_balance - row["balance"]
+        c.execute("UPDATE users SET balance=? WHERE user_id=?", (new_balance, uid))
+        c.execute("INSERT INTO ledger(user_id,delta,reason,created_at) VALUES(?,?,?,?)", (uid, delta, "Изменение администратором", datetime.now(timezone.utc).isoformat())); c.commit()
+    await state.clear()
+    await message.answer("✅ Новый баланс: " + str(new_balance) + " ⭐", reply_markup=main_keyboard(True))
+
+async def cb_admin_stats(call: CallbackQuery):
+    if not is_admin(call.from_user):
+        await call.answer("⛔ Нет доступа.", show_alert=True); return
+    with closing(db()) as c:
+        users = c.execute("SELECT COUNT(*) n FROM users").fetchone()["n"]
+        rewards = c.execute("SELECT COUNT(*) n FROM users WHERE rewarded=1").fetchone()["n"]
+        total = c.execute("SELECT COALESCE(SUM(balance),0) n FROM users").fetchone()["n"]
+        pending = c.execute("SELECT COUNT(*) n FROM withdrawals WHERE status='pending'").fetchone()["n"]
+    await call.message.edit_text("📊 Статистика\nПользователей: " + str(users) + "\nРефералов с наградой: " + str(rewards) + "\nБаланс пользователей: " + str(total) + " ⭐\nОжидающих заявок: " + str(pending), reply_markup=admin_back())
+    await call.answer()
+
+async def cb_admin_withdrawals(call: CallbackQuery):
+    if not is_admin(call.from_user):
+        await call.answer("⛔ Нет доступа.", show_alert=True); return
+    with closing(db()) as c:
+        rows = c.execute("SELECT id,user_id,amount FROM withdrawals WHERE status='pending' ORDER BY id LIMIT 15").fetchall()
+    text = "📥 Заявки на вывод\n\n"
+    text += "\n".join("#" + str(x["id"]) + " · пользователь " + str(x["user_id"]) + " · " + str(x["amount"]) + " ⭐\n/approve " + str(x["id"]) + " или /reject " + str(x["id"]) for x in rows) if rows else "Нет ожидающих заявок."
+    await call.message.edit_text(text, reply_markup=admin_back())
+    await call.answer()
+
 async def health(request):
     return web.Response(text="WoodooGifi is alive")
 
 async def main():
     init_db()
     bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
     dp.message.register(on_start, CommandStart())
     dp.callback_query.register(check_sub, F.data == "check_sub")
+    dp.callback_query.register(cb_admin_panel, F.data == "admin_panel")
+    dp.callback_query.register(cb_admin_reward, F.data == "adm_reward")
+    dp.callback_query.register(cb_admin_channels, F.data == "adm_channels")
+    dp.callback_query.register(cb_admin_add_channel, F.data == "adm_add_channel")
+    dp.callback_query.register(cb_admin_delete_channel, F.data.startswith("adm_delch:"))
+    dp.callback_query.register(cb_admin_balance, F.data == "adm_balance")
+    dp.callback_query.register(cb_admin_stats, F.data == "adm_stats")
+    dp.callback_query.register(cb_admin_withdrawals, F.data == "adm_withdrawals")
+    dp.message.register(process_admin_reward, AdminStates.reward)
+    dp.message.register(process_admin_channel_id, AdminStates.channel_id)
+    dp.message.register(process_admin_channel_link, AdminStates.channel_link)
+    dp.message.register(process_admin_channel_name, AdminStates.channel_name)
+    dp.message.register(process_admin_user_id, AdminStates.user_id)
+    dp.message.register(process_admin_balance_value, AdminStates.balance_value)
     dp.message.register(withdraw, Command("withdraw"))
     dp.message.register(cmd_stats, Command("stats"))
     dp.message.register(setreward, Command("setreward"))
