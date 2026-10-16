@@ -2,7 +2,6 @@ import asyncio
 import html
 import logging
 import os
-from contextlib import asynccontextmanager
 from decimal import Decimal, InvalidOperation
 
 import asyncpg
@@ -222,6 +221,9 @@ async def home_or_subscription(message: types.Message, user_id: int) -> None:
             reply_markup=channel_keyboard(missing),
         )
         return
+    # If no channels are configured, or the user is already subscribed, reward a
+    # pending referral immediately. The database flag prevents duplicate rewards.
+    await reward_referral_if_ready(user_id)
     await message.answer("🌟 Добро пожаловать в WoodooGifi!", reply_markup=main_keyboard(user_id))
 
 
@@ -357,8 +359,8 @@ async def withdraw_start(message: types.Message, state: FSMContext):
     await ensure_user(message.from_user)
     user = await user_stats(message.from_user.id)
     minimum = int(await get_setting("min_referrals", str(MIN_REFERRALS_DEFAULT)))
-    if user["invited"] < minimum:
-        await message.answer(f"🔒 Для вывода нужно пригласить минимум {minimum} друзей.\nОсталось: {minimum - user['invited']}.")
+    if user["rewarded"] < minimum:
+        await message.answer(f"🔒 Для вывода нужно минимум {minimum} друзей, выполнивших условия подписки.\nОсталось: {minimum - user['rewarded']}.")
         return
     if user["balance"] <= 0:
         await message.answer("⭐ На балансе пока нет Stars для вывода.")
