@@ -18,6 +18,7 @@ from aiogram.types import (
 
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "xoyli").lstrip("@").lower()
+ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
 DB_PATH = os.getenv("DB_PATH", "/var/data/woodoogifi.sqlite3")
 PORT = int(os.getenv("PORT", "10000"))
 if not TOKEN:
@@ -65,7 +66,7 @@ def setting(key, default=""):
         return row["value"] if row else default
 
 def is_admin(user):
-    return bool(user and user.username and user.username.lower() == ADMIN_USERNAME)
+    return bool(user and (user.id in ADMIN_IDS or (user.username and user.username.lower() == ADMIN_USERNAME)))
 
 def main_keyboard(admin=False):
     rows = [
@@ -158,6 +159,7 @@ async def stats_text(user_id):
 
 async def admin_panel(message_or_call, user):
     text = ("🛡 Админ-панель WoodooGifi\n\n"
+            "Награда за реферала и каналы настраиваются командами ниже.\n"
             "Команды администратора:\n"
             "/stats — общая статистика\n"
             "/setreward 3 — награда за реферала\n"
@@ -221,7 +223,7 @@ async def withdraw(message: Message):
         amount, details = int(parts[1]), parts[2].strip()
         if amount <= 0 or not details: raise ValueError()
     except ValueError:
-        await message.answer("Формат: /withdraw КОЛИЧЕСТВО реквизиты\nНапример: /withdraw 10 @username")
+        await message.answer("Формат: /withdraw КОЛИЧЕСТВО реквизиты\nМинимальный вывод: 100 ⭐\nНапример: /withdraw 100 @username")
         return
     with closing(db()) as c:
         row = c.execute("SELECT balance FROM users WHERE user_id=?", (message.from_user.id,)).fetchone()
@@ -236,10 +238,12 @@ async def withdraw(message: Message):
             (message.from_user.id, -amount, f"Заявка на вывод #{wid}", datetime.now(timezone.utc).isoformat()))
         c.commit()
     await message.answer(f"✅ Заявка #{wid} создана. Администратор рассмотрит её.")
-    # Admin notifications are best effort.
-    try:
-        await message.bot.send_message(f"@{ADMIN_USERNAME}", f"📥 Заявка #{wid}\nПользователь: {message.from_user.id}\nСумма: {amount} ⭐\nРеквизиты: {details}\n/approve {wid} или /reject {wid}")
-    except Exception: pass
+    # Notifications are sent to configured numeric admin IDs.
+    for admin_id in ADMIN_IDS:
+        try:
+            await message.bot.send_message(admin_id, f"📥 Заявка #{wid}\nПользователь: {message.from_user.id}\nСумма: {amount} ⭐\nРеквизиты: {details}\n/approve {wid} или /reject {wid}")
+        except Exception:
+            log.exception("Could not notify admin %s", admin_id)
 
 async def admin_command(message: Message):
     if not is_admin(message.from_user):
