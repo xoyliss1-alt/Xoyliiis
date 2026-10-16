@@ -1,0 +1,17 @@
+services:
+  - type: worker
+    name: woodoogifi-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    disk:
+      name: woodoogifi-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_USERNAME
+        value: xoyli
+      - key: DB_PATH
+        value: /var/data/woodoogifi.sqlite3
