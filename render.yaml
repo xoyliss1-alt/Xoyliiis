@@ -9,7 +9,7 @@ services:
     name: woodoogifi
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && python -m py_compile main.py
     startCommand: python main.py
     healthCheckPath: /health
     envVars:
